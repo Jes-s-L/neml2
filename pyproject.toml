@@ -1,7 +1,8 @@
 [build-system]
 requires = [
   "setuptools>=42",
-  "cmake>=3.26,<4.0",
+  # dependencies: cmake.version_min
+  "cmake>=3.26",
   "ninja",
   "pybind11",
   "pybind11-stubgen",
@@ -18,6 +19,7 @@ authors = [
 ]
 description = "GPU-enabled vectorized material modeling library"
 readme = "README.md"
+# dependencies: python.version_min
 requires-python = ">=3.9"
 dependencies = ["torch"]
 
@@ -32,9 +34,9 @@ environment = { CMAKE_GENERATOR = "Ninja" }
 build-verbosity = 1
 
 before-all = ""
-before-build = "python -m pip install -r requirements.txt cmake ninja torch"
-
-test-requires = "pytest torch pyzag==1.1.1 graphviz"
+before-build = "python -m pip install -r requirements.txt torch"
+before-test = "python -m pip install -r ${project}/python/tests/requirements.txt torch"
+test-requires = ""
 test-command = "pytest -v {project}/python/tests"
 
 [tool.cibuildwheel.linux]

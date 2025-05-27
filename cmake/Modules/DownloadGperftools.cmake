@@ -23,7 +23,7 @@ FetchContent_Populate(
   gperftools
   QUIET
   GIT_REPOSITORY https://github.com/gperftools/gperftools.git
-  GIT_TAG gperftools-${GPERFTOOLS_VERSION}
+  GIT_TAG ${GPERFTOOLS_VERSION}
   SOURCE_DIR ${Gperftools_SOURCE_DIR}
   BINARY_DIR ${Gperftools_WORKING_DIR}
   SUBBUILD_DIR ${Gperftools_SUBBUILD_DIR}

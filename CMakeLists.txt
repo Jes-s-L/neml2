@@ -1,6 +1,7 @@
 # ----------------------------------------------------------------------------
 # Project metadata
 # ----------------------------------------------------------------------------
+# dependencies: cmake.version_min
 cmake_minimum_required(VERSION 3.26)
 project(NEML2 VERSION 2.0.0 LANGUAGES C CXX)
 
@@ -29,7 +30,7 @@ if(NOT DEFINED CMAKE_BUILD_TYPE)
       set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build." FORCE)
 endif()
 
-set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo" "Coverage" , "ThreadSanitizer" , "Profiling")
+set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "Coverage" "ThreadSanitizer" "Profiling")
 
 # ----------------------------------------------------------------------------
 # Enable gcov wrapper for clang
@@ -67,17 +68,34 @@ set(NEML2_JSON OFF CACHE BOOL "Enable JSON support")
 # ----------------------------------------------------------------------------
 # Dependencies and 3rd party packages
 # ----------------------------------------------------------------------------
-add_custom_target(deps)
+# dependencies: torch.version
 set(TORCH_VERSION "2.5.1" CACHE STRING "Default libTorch/PyTorch version to download")
+
+# dependencies: doxygen.version
 set(DOXYGEN_VERSION "1.13.2" CACHE STRING "Default doxygen version to download")
-set(DOXYGEN_AWESOME_VERSION "2.3.4" CACHE STRING "Default doxygen-awesome version to download")
-set(PYBIND11_VERSION "2.13.6" CACHE STRING "Default pybind11 version to download")
+
+# dependencies: doxygen_awesome.version
+set(DOXYGEN_AWESOME_VERSION "v2.3.4" CACHE STRING "Default doxygen-awesome version to download")
+
+# dependencies: wasp.version
 set(WASP_VERSION "cf46fbd0d224cc2a70edbc668d3e65d45bec9e16" CACHE STRING "Default WASP version to download (if not found)")
+
+# dependencies: hit.version
 set(HIT_VERSION "2b56209d3f1a1c5f0bede15a3e13981b599a5f91" CACHE STRING "Default HIT version to download")
-set(CATCH2_VERSION "3.5.4" CACHE STRING "Default Catch2 version to download (if not found)")
-set(GPERFTOOLS_VERSION "2.15" CACHE STRING "Default gperftools version to download")
-set(ARGPARSE_VERSION "3.0" CACHE STRING "Default argparse version to download")
-set(TIMPI_VERSION "1.8.5_bootstrapped" CACHE STRING "Default TIMPI version to download")
+
+# dependencies: catch2.version
+set(CATCH2_VERSION "v3.5.4" CACHE STRING "Default Catch2 version to download (if not found)")
+
+# dependencies: gperftools.version
+set(GPERFTOOLS_VERSION "gperftools-2.15" CACHE STRING "Default gperftools version to download")
+
+# dependencies: argparse.version
+set(ARGPARSE_VERSION "v3.0" CACHE STRING "Default argparse version to download")
+
+# dependencies: timpi.version
+set(TIMPI_VERSION "v1.8.5_bootstrapped" CACHE STRING "Default TIMPI version to download")
+
+# dependencies: nlohmann_json.version
 set(NLOHMANN_JSON_VERSION "3.11.3" CACHE STRING "Default nlohmann json version to download")
 
 # ----------------------------------------------------------------------------
@@ -190,7 +208,7 @@ if(NEML2_JSON)
 
       if(NOT TARGET nlohmann_json::nlohmann_json)
             include(FetchContent)
-            FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v${NLOHMANN_JSON_VERSION}/json.tar.xz)
+            FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/${NLOHMANN_JSON_VERSION}/json.tar.xz)
             message(STATUS "Downloading/updating nlohmann/json")
             set(JSON_Install ON)
             set(JSON_SystemInclude ON)
@@ -268,7 +286,7 @@ if(NEML2_DOC)
       FetchContent_Declare(
             doxygen-awesome-css
             GIT_REPOSITORY https://github.com/jothepro/doxygen-awesome-css.git
-            GIT_TAG v${DOXYGEN_AWESOME_VERSION}
+            GIT_TAG ${DOXYGEN_AWESOME_VERSION}
       )
       FetchContent_MakeAvailable(doxygen-awesome-css)
 endif()

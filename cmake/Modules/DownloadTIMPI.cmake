@@ -17,7 +17,7 @@ include(FetchContent)
 FetchContent_Declare(
   timpi
   GIT_REPOSITORY https://github.com/libMesh/TIMPI.git
-  GIT_TAG v${TIMPI_VERSION}
+  GIT_TAG ${TIMPI_VERSION}
 )
 
 message(STATUS "Downloading/updating TIMPI")
