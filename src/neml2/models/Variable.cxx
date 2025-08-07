@@ -30,13 +30,16 @@
 #include "neml2/tensors/functions/bmm.h"
 #include "neml2/jit/utils.h"
 #include "neml2/jit/TraceableTensorShape.h"
+#include <ATen/core/interned_strings.h>
+#include <ATen/ops/permute.h>
+#include <numeric>
 
 namespace neml2
 {
-VariableBase::VariableBase(VariableName name_in, Model * owner, TensorShapeRef list_shape)
+VariableBase::VariableBase(VariableName name_in, Model * owner, TensorShapeRef lbatch_shape)
   : _name(std::move(name_in)),
     _owner(owner),
-    _list_sizes(list_shape)
+    _lbatch_sizes(lbatch_shape)
 {
 }
 
@@ -145,15 +148,15 @@ VariableBase::batched() const
 }
 
 Size
-VariableBase::batch_dim() const
+VariableBase::lbatch_dim() const
 {
-  return tensor().batch_dim();
+  return Size(lbatch_sizes().size());
 }
 
 Size
-VariableBase::list_dim() const
+VariableBase::batch_dim() const
 {
-  return Size(list_sizes().size());
+  return tensor().batch_dim() - lbatch_dim();
 }
 
 Size
@@ -162,34 +165,37 @@ VariableBase::base_dim() const
   return Size(base_sizes().size());
 }
 
+TensorShapeRef
+VariableBase::lbatch_sizes() const
+{
+  return _lbatch_sizes;
+}
+
 TraceableTensorShape
 VariableBase::batch_sizes() const
 {
-  return tensor().batch_sizes();
+  return tensor().batch_sizes().slice(lbatch_dim());
 }
 
-TensorShapeRef
-VariableBase::list_sizes() const
+Size
+VariableBase::lbatch_size(Size dim) const
 {
-  return _list_sizes;
+  auto i = dim < 0 ? lbatch_dim() + dim : dim;
+  return lbatch_sizes()[i];
 }
 
 TraceableSize
 VariableBase::batch_size(Size dim) const
 {
-  return tensor().batch_size(dim);
+  auto i = dim < 0 ? batch_dim() + dim : dim;
+  return batch_sizes()[i];
 }
 
 Size
 VariableBase::base_size(Size dim) const
 {
-  return base_sizes()[dim];
-}
-
-Size
-VariableBase::list_size(Size dim) const
-{
-  return list_sizes()[dim];
+  auto i = dim < 0 ? base_dim() + dim : dim;
+  return base_sizes()[i];
 }
 
 Size
@@ -201,13 +207,70 @@ VariableBase::base_storage() const
 Size
 VariableBase::assembly_storage() const
 {
-  return utils::storage_size(list_sizes()) * utils::storage_size(base_sizes());
+  return utils::storage_size(lbatch_sizes()) * utils::storage_size(base_sizes());
 }
 
 bool
 VariableBase::requires_grad() const
 {
   return tensor().requires_grad();
+}
+
+Tensor
+VariableBase::make_zeros(const TraceableTensorShape & batch_shape,
+                         const TensorOptions & options) const
+{
+  // First create a dummy tensor with batch dimensions filled with ones
+  auto dummy_batch_sizes = TensorShape(batch_shape.size(), 1);
+  auto B = utils::add_shapes(lbatch_sizes(), dummy_batch_sizes);
+  auto tensor = Tensor::zeros(B, base_sizes(), options);
+  // Then expand it to the batch shape
+  if (!batch_shape.empty())
+  {
+    auto B = utils::add_traceable_shapes(lbatch_sizes(), batch_shape);
+    tensor = tensor.batch_expand(B);
+  }
+  return tensor;
+}
+
+Tensor
+VariableBase::from_assembly(const Tensor & val) const
+{
+  // shortcut when there's no left-batch dimension
+  if (!lbatch_dim())
+    return val.base_reshape(base_sizes());
+
+  // left-batch shapes are special:
+  // it is a "base" shape at assembly time, and a "batch" shape at operation time
+  const auto B = utils::add_traceable_shapes(lbatch_sizes(), val.batch_sizes());
+  const auto D = utils::add_shapes(lbatch_sizes(), base_sizes());
+  // reshape to (batch; lbatch, base)
+  auto v = val.base_reshape(D);
+  // move lbatch to the front, i.e. (lbatch, batch; base)
+  TensorShape permutation(v.dim());
+  std::iota(permutation.begin(), permutation.end(), 0);
+  auto begin = permutation.begin() + val.batch_dim();
+  auto end = begin + lbatch_dim();
+  std::rotate(begin, end, permutation.begin());
+  return Tensor(at::permute(v, permutation), B);
+}
+
+Tensor
+VariableBase::to_assembly(const Tensor & val) const
+{
+  // shortcut when there's no left-batch dimension
+  if (!lbatch_dim())
+    return val.base_flatten();
+
+  // variable format has shape (lbatch, batch; base)
+  // we need to permute it to (batch; lbatch, base)
+  TensorShape permutation(val.dim());
+  std::iota(permutation.begin(), permutation.end(), 0);
+  auto begin = permutation.begin();
+  auto end = begin + lbatch_dim();
+  std::rotate(begin, end, permutation.end() - base_dim());
+  return Tensor(at::permute(val, permutation), val.batch_sizes().slice(lbatch_dim()))
+      .base_flatten();
 }
 
 Derivative
@@ -219,7 +282,7 @@ VariableBase::d(const VariableBase & var)
                   "' with respect to '",
                   var.name(),
                   "'.");
-  return Derivative({assembly_storage(), var.assembly_storage()}, &_derivs[var.name()]);
+  return Derivative(*this, var, &_derivs[var.name()]);
 }
 
 Derivative
@@ -233,8 +296,7 @@ VariableBase::d(const VariableBase & var1, const VariableBase & var2)
                   "' and '",
                   var2.name(),
                   "'.");
-  return Derivative({assembly_storage(), var1.assembly_storage(), var2.assembly_storage()},
-                    &_sec_derivs[var1.name()][var2.name()]);
+  return Derivative(*this, var1, var2, &_sec_derivs[var1.name()][var2.name()]);
 }
 
 void
@@ -396,15 +458,11 @@ std::unique_ptr<VariableBase>
 Variable<T>::clone(const VariableName & name, Model * owner) const
 {
   if constexpr (std::is_same_v<T, Tensor>)
-  {
-    return std::move(std::make_unique<Variable<Tensor>>(
-        name.empty() ? this->name() : name, owner ? owner : _owner, list_sizes(), base_sizes()));
-  }
+    return std::make_unique<Variable<Tensor>>(
+        name.empty() ? this->name() : name, owner ? owner : _owner, lbatch_sizes(), base_sizes());
   else
-  {
-    return std::move(std::make_unique<Variable<T>>(
-        name.empty() ? this->name() : name, owner ? owner : _owner, list_sizes()));
-  }
+    return std::make_unique<Variable<T>>(
+        name.empty() ? this->name() : name, owner ? owner : _owner, lbatch_sizes());
 }
 
 template <typename T>
@@ -449,12 +507,7 @@ void
 Variable<T>::zero(const TensorOptions & options)
 {
   if (owning())
-  {
-    if constexpr (std::is_same_v<T, Tensor>)
-      _value = T::zeros(list_sizes(), base_sizes(), options);
-    else
-      _value = T::zeros(list_sizes(), options);
-  }
+    _value = T(make_zeros({}, options));
   else
   {
     neml_assert_dbg(_ref_is_mutable,
@@ -475,8 +528,7 @@ void
 Variable<T>::set(const Tensor & val)
 {
   if (owning())
-    _value = T(val.base_reshape(utils::add_shapes(list_sizes(), base_sizes())),
-               utils::add_traceable_shapes(val.batch_sizes(), list_sizes()));
+    _value = from_assembly(val);
   else
   {
     neml_assert_dbg(_ref_is_mutable,
@@ -522,7 +574,8 @@ template <typename T>
 Tensor
 Variable<T>::get() const
 {
-  return tensor().base_flatten();
+  neml_assert_dbg(_value.defined(), "Variable '", name(), "' has undefined value.");
+  return to_assembly(_value);
 }
 
 template <typename T>
@@ -530,11 +583,7 @@ Tensor
 Variable<T>::tensor() const
 {
   if (owning())
-  {
-    neml_assert_dbg(_value.defined(), "Variable '", name(), "' has undefined value.");
-    auto batch_sizes = _value.batch_sizes().slice(0, _value.batch_dim() - list_dim());
-    return Tensor(_value, batch_sizes);
-  }
+    return _value;
 
   return ref()->tensor();
 }
@@ -598,13 +647,116 @@ Variable<T>::clear()
 #define INSTANTIATE_VARIABLE(T) template class Variable<T>
 FOR_ALL_PRIMITIVETENSOR(INSTANTIATE_VARIABLE);
 
+Derivative::Derivative(const VariableBase & var1, const VariableBase & var2, Tensor * deriv)
+  : _lbatch_sizes({var1.lbatch_sizes(), var2.lbatch_sizes()}),
+    _base_sizes({var1.base_sizes(), var2.base_sizes()}),
+    _assembly_sizes({var1.assembly_storage(), var2.assembly_storage()}),
+    _deriv(deriv)
+#ifndef NDEBUG
+    ,
+    _debug_name(std::string("d(") + var1.name().str() + ")/d(" + var2.name().str() + ")")
+#endif
+{
+}
+
+Derivative::Derivative(const VariableBase & var1,
+                       const VariableBase & var2,
+                       const VariableBase & var3,
+                       Tensor * deriv)
+  : _lbatch_sizes({var1.lbatch_sizes(), var2.lbatch_sizes(), var3.lbatch_sizes()}),
+    _base_sizes({var1.base_sizes(), var2.base_sizes(), var3.base_sizes()}),
+    _assembly_sizes({var1.assembly_storage(), var2.assembly_storage(), var3.assembly_storage()}),
+    _deriv(deriv)
+#ifndef NDEBUG
+    ,
+    _debug_name(std::string("d2(") + var1.name().str() + ")/d(" + var2.name().str() + ")/d(" +
+                var3.name().str() + ")")
+#endif
+{
+}
+
 Derivative &
 Derivative::operator=(const Tensor & val)
 {
-  if (!_deriv->defined())
-    *_deriv = val.base_reshape(_base_sizes);
-  else
-    *_deriv = *_deriv + val.base_reshape(_base_sizes);
+#ifndef NDEBUG
+  // check if the given derivative has the correct left-batch shape
+  const auto lbatch_sizes =
+      _lbatch_sizes.size() == 2
+          ? utils::add_shapes(_lbatch_sizes[0], _lbatch_sizes[1])
+          : utils::add_shapes(_lbatch_sizes[0], _lbatch_sizes[1], _lbatch_sizes[2]);
+  neml_assert_dbg(val.batch_dim() >= Size(lbatch_sizes.size()) &&
+                      val.batch_sizes().slice(0, Size(lbatch_sizes.size())) == lbatch_sizes,
+                  "The assigned derivative for ",
+                  _debug_name,
+                  " has incorrect batch shape ",
+                  val.batch_sizes(),
+                  " which is incompatible with the expected left-batch shape of ",
+                  lbatch_sizes,
+                  ".");
+  // check if the given derivative has the correct base shape
+  const auto base_sizes = _base_sizes.size() == 2
+                              ? utils::add_shapes(_base_sizes[0], _base_sizes[1])
+                              : utils::add_shapes(_base_sizes[0], _base_sizes[1], _base_sizes[2]);
+  const auto base_dim = Size(base_sizes.size());
+  neml_assert_dbg(val.base_dim() == base_dim && val.base_sizes() == base_sizes,
+                  "The assigned derivative for ",
+                  _debug_name,
+                  " has incorrect base shape ",
+                  val.base_sizes(),
+                  " which is incompatible with the expected base shape of ",
+                  base_sizes,
+                  ".");
+#endif
+
+  // shortcut when there's no left-batch dimension
+  if (_lbatch_sizes.empty())
+  {
+    assign_or_add(*_deriv, val.base_reshape(_assembly_sizes));
+    return *this;
+  }
+
+  // Move each left-batch to the base
+  //
+  // For example, for first order derivatives with left-batch shapes, the tensor shape of the given
+  // derivative is
+  //   (lbatch1, lbatch2, batch; base1, base2)
+  //
+  // We first move lbatch1 before base1:
+  //   (lbatch2, batch; lbatch1, base1, base2)
+  //
+  // Then we move lbatch2 before base2:
+  //   (batch; lbatch1, base1, lbatch2, base2)
+  //
+  // Finally, we can flatten the base dimensions to get the assembly shape:
+  //   (batch; assembly1, assembly2)
+  //
+  // The same procedure applies to second order derivatives with three left-batch groups.
+  Size lbatch_dim = 0;
+  TensorShape indices(val.dim());
+  std::iota(indices.begin(), indices.end(), 0);
+  auto permutation = indices;
+  auto itr = permutation.begin() + val.batch_dim();
+  for (std::size_t i = 0; i < _lbatch_sizes.size(); ++i)
+  {
+    if (!_lbatch_sizes[i].empty())
+    {
+      lbatch_dim += Size(_lbatch_sizes[i].size());
+      auto begin = permutation.begin();
+      auto end = begin + _lbatch_sizes[i].size();
+      std::rotate(begin, end, itr);
+    }
+    itr = permutation.begin() + _base_sizes[i].size();
+  }
+
+  auto B = val.batch_sizes().slice(lbatch_dim);
+  auto val2 = Tensor(at::permute(val, permutation), B);
+  assign_or_add(*_deriv, val2.base_reshape(_assembly_sizes));
   return *this;
+}
+
+Derivative &
+Derivative::operator=(const VariableBase & var)
+{
+  return Derivative::operator=(var.tensor());
 }
 }
